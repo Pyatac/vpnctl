@@ -1,0 +1,18 @@
+# Runtime
+clients/
+links/
+builds/
+backups/
+
+# Real configs
+config.cfg
+template.json
+test-config.json
+
+# Editor
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db

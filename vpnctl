@@ -1,0 +1,410 @@
+#!/bin/bash
+set -e
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "$(readlink -f "$0")")" && pwd)"
+
+CONFIG_FILE="$SCRIPT_DIR/config.cfg"
+CLIENTS_DIR="$SCRIPT_DIR/clients"
+LINKS_DIR="$SCRIPT_DIR/links"
+BUILDS_DIR="$SCRIPT_DIR/builds"
+BACKUP_DIR="$SCRIPT_DIR/backups"
+TEMPLATE="$SCRIPT_DIR/template.json"
+BUILD="$SCRIPT_DIR/builds/config.json"
+
+REAL_CONFIG="/etc/sing-box/config.json"
+SERVICE_NAME="sing-box"
+
+source "$CONFIG_FILE"
+
+mkdir -p "$CLIENTS_DIR" "$LINKS_DIR" "$BUILDS_DIR" "$BACKUP_DIR"
+
+make_link() {
+  local uuid="$1"
+  local name="$2"
+  echo "vless://${uuid}@${SERVER}:${PORT}?type=tcp&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&flow=${FLOW}#${name}"
+}
+
+validate_name() {
+  echo "$1" | grep -Eq '^[A-Za-z0-9_-]+$' || {
+    echo "Invalid name. Use only: A-Z a-z 0-9 _ -"
+    exit 1
+  }
+}
+
+add_client() {
+  local name="$1"
+  [ -z "$name" ] && echo "Client name required" && exit 1
+  validate_name "$name"
+
+  local file="$CLIENTS_DIR/${name}.json"
+  local linkfile="$LINKS_DIR/${name}.txt"
+
+  [ -f "$file" ] && echo "Client already exists: $name" && exit 1
+
+  local uuid
+  uuid=$(sing-box generate uuid)
+
+  cat > "$file" <<EOF
+{
+  "name": "$name",
+  "uuid": "$uuid",
+  "flow": "$FLOW",
+  "created": "$(date +%Y-%m-%d)"
+}
+EOF
+
+  make_link "$uuid" "$name" > "$linkfile"
+
+  echo "Client created: $name"
+  echo
+  cat "$linkfile"
+  echo
+  build_config
+}
+
+list_clients() {
+  printf "%-24s %-12s %-36s\n" "NAME" "CREATED" "UUID"
+  printf "%-24s %-12s %-36s\n" "----" "-------" "----"
+
+  for file in "$CLIENTS_DIR"/*.json; do
+    [ -e "$file" ] || return 0
+    jq -r '[.name, .created, .uuid] | @tsv' "$file" |
+      awk -F '\t' '{printf "%-24s %-12s %-36s\n", $1, $2, $3}'
+  done
+}
+
+show_client() {
+  local name="$1"
+  [ -z "$name" ] && echo "Client name required" && exit 1
+  validate_name "$name"
+
+  local linkfile="$LINKS_DIR/${name}.txt"
+  [ ! -f "$linkfile" ] && echo "Client not found: $name" && exit 1
+
+  cat "$linkfile"
+}
+
+remove_client() {
+  local name="$1"
+  [ -z "$name" ] && echo "Client name required" && exit 1
+  validate_name "$name"
+
+  [ ! -f "$CLIENTS_DIR/${name}.json" ] && echo "Client not found: $name" && exit 1
+
+  rm -f "$CLIENTS_DIR/${name}.json" "$LINKS_DIR/${name}.txt"
+
+  echo "Client removed: $name"
+  build_config
+}
+
+disable_client() {
+    local name="$1"
+
+    [ -z "$name" ] && echo "Client name required" && exit 1
+    validate_name "$name"
+
+    local file="$CLIENTS_DIR/${name}.json"
+
+    [ ! -f "$file" ] && {
+        echo "Client not found: $name"
+        exit 1
+    }
+
+    mv "$file" "$file.disabled"
+
+    echo "Client disabled: $name"
+
+    build_config
+}
+
+enable_client() {
+    local name="$1"
+
+    [ -z "$name" ] && echo "Client name required" && exit 1
+    validate_name "$name"
+
+    local file="$CLIENTS_DIR/${name}.json.disabled"
+
+    [ ! -f "$file" ] && {
+        echo "Disabled client not found: $name"
+        exit 1
+    }
+
+    mv "$file" "$CLIENTS_DIR/${name}.json"
+
+    echo "Client enabled: $name"
+
+    build_config
+}
+
+rename_client() {
+  local old="$1"
+  local new="$2"
+
+  [ -z "$old" ] && echo "Old name required" && exit 1
+  [ -z "$new" ] && echo "New name required" && exit 1
+
+  validate_name "$old"
+  validate_name "$new"
+
+  local oldfile="$CLIENTS_DIR/${old}.json"
+  local newfile="$CLIENTS_DIR/${new}.json"
+
+  [ ! -f "$oldfile" ] && echo "Client not found: $old" && exit 1
+  [ -f "$newfile" ] && echo "Target client already exists: $new" && exit 1
+
+  jq --arg name "$new" '.name = $name' "$oldfile" > /tmp/vpnctl-rename.json
+
+  mv /tmp/vpnctl-rename.json "$newfile"
+  rm -f "$oldfile"
+
+  local uuid
+  uuid=$(jq -r '.uuid' "$newfile")
+
+  make_link "$uuid" "$new" > "$LINKS_DIR/${new}.txt"
+  rm -f "$LINKS_DIR/${old}.txt"
+
+  echo "Renamed: $old -> $new"
+  build_config
+}
+
+build_config() {
+  [ ! -f "$TEMPLATE" ] && echo "Template not found: $TEMPLATE" && exit 1
+
+  if ls "$CLIENTS_DIR"/*.json >/dev/null 2>&1; then
+    jq -s 'map({uuid: .uuid, flow: .flow})' "$CLIENTS_DIR"/*.json > /tmp/vpnctl-users.json
+  else
+    echo "[]" > /tmp/vpnctl-users.json
+  fi
+
+  jq --slurpfile users /tmp/vpnctl-users.json \
+    '.inbounds[0].users = $users[0]' \
+    "$TEMPLATE" > "$BUILD"
+
+  jq empty "$BUILD"
+  sing-box check -c "$BUILD"
+
+  echo "Config built: $BUILD"
+}
+
+verify_config() {
+  build_config
+
+  echo
+  echo "Current config users:"
+  jq '.inbounds[0].users | length' "$REAL_CONFIG"
+
+  echo "Built config users:"
+  jq '.inbounds[0].users | length' "$BUILD"
+
+  echo
+  echo "Duplicate UUID check:"
+  local duplicates
+  duplicates=$(jq -r '.inbounds[0].users[].uuid' "$BUILD" | sort | uniq -d)
+
+  if [ -n "$duplicates" ]; then
+    echo "Duplicate UUID found:"
+    echo "$duplicates"
+    exit 1
+  fi
+
+  echo "No duplicates."
+
+  echo
+  echo "sing-box check:"
+  sing-box check -c "$BUILD"
+
+  echo
+  echo "Verify complete."
+}
+
+import_clients() {
+  jq -c '.inbounds[0].users[]' "$REAL_CONFIG" | nl -w1 -s' ' | while read -r num user; do
+    uuid=$(echo "$user" | jq -r '.uuid')
+    flow=$(echo "$user" | jq -r '.flow // "xtls-rprx-vision"')
+    name="imported_${num}"
+
+    if [ -f "$CLIENTS_DIR/${name}.json" ]; then
+      echo "Skip existing: $name"
+      continue
+    fi
+
+    cat > "$CLIENTS_DIR/${name}.json" <<EOF
+{
+  "name": "$name",
+  "uuid": "$uuid",
+  "flow": "$flow",
+  "created": "$(date +%Y-%m-%d)"
+}
+EOF
+
+    make_link "$uuid" "$name" > "$LINKS_DIR/${name}.txt"
+  done
+
+  echo "Import complete."
+  build_config
+}
+
+deploy_config() {
+  verify_config
+
+  echo
+  echo "About to replace:"
+  echo "$REAL_CONFIG"
+  echo
+  echo "Service to restart:"
+  echo "$SERVICE_NAME"
+  echo
+  read -p "Type yes to continue: " CONFIRM
+
+  [ "$CONFIRM" != "yes" ] && echo "Deploy cancelled." && exit 1
+
+  local backup="$BACKUP_DIR/config-$(date +%Y%m%d-%H%M%S).json"
+
+  cp "$REAL_CONFIG" "$backup"
+  cp "$BUILD" "$REAL_CONFIG"
+
+  if ! sing-box check -c "$REAL_CONFIG"; then
+    echo "Check failed. Rollback."
+    cp "$backup" "$REAL_CONFIG"
+    exit 1
+  fi
+
+  if ! systemctl restart "$SERVICE_NAME"; then
+    echo "Restart failed. Rollback."
+    cp "$backup" "$REAL_CONFIG"
+    systemctl restart "$SERVICE_NAME"
+    exit 1
+  fi
+
+  echo "Deploy complete."
+  echo "Backup: $backup"
+}
+
+setup_server() {
+  echo "=== VPNCTL SETUP ==="
+
+  command -v jq >/dev/null 2>&1 || { echo "Install jq first: apt install -y jq"; exit 1; }
+  command -v sing-box >/dev/null 2>&1 || { echo "Install sing-box first"; exit 1; }
+
+  read -p "Server IP or domain: " SETUP_SERVER
+  read -p "Port [8443]: " SETUP_PORT
+  read -p "SNI [www.cloudflare.com]: " SETUP_SNI
+
+  SETUP_PORT="${SETUP_PORT:-8443}"
+  SETUP_SNI="${SETUP_SNI:-www.cloudflare.com}"
+
+  FIRST_UUID=$(sing-box generate uuid)
+  KEYPAIR=$(sing-box generate reality-keypair)
+  PRIVATE_KEY=$(echo "$KEYPAIR" | awk '/PrivateKey:/ {print $2}')
+  PUBLIC_KEY=$(echo "$KEYPAIR" | awk '/PublicKey:/ {print $2}')
+  SHORT_ID=$(openssl rand -hex 8)
+
+  echo
+  echo "Generated:"
+  echo "UUID: $FIRST_UUID"
+  echo "PublicKey: $PUBLIC_KEY"
+  echo "ShortID: $SHORT_ID"
+
+  mkdir -p "$CLIENTS_DIR" "$LINKS_DIR" "$BUILDS_DIR" "$BACKUP_DIR"
+
+  cat > "$CONFIG_FILE" <<EOF
+SERVER=$SETUP_SERVER
+PORT=$SETUP_PORT
+SNI=$SETUP_SNI
+PUBLIC_KEY=$PUBLIC_KEY
+SHORT_ID=$SHORT_ID
+FLOW=xtls-rprx-vision
+EOF
+
+  cat > "$TEMPLATE" <<EOF
+{
+  "log": {
+    "level": "warn",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "vless",
+      "tag": "vless-reality-in",
+      "listen": "::",
+      "listen_port": $SETUP_PORT,
+      "users": [],
+      "tls": {
+        "enabled": true,
+        "server_name": "$SETUP_SNI",
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "$SETUP_SNI",
+            "server_port": 443
+          },
+          "private_key": "$PRIVATE_KEY",
+          "short_id": [
+            "$SHORT_ID"
+          ]
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ]
+}
+EOF
+
+  cat > "$CLIENTS_DIR/main.json" <<EOF
+{
+  "name": "main",
+  "uuid": "$FIRST_UUID",
+  "flow": "xtls-rprx-vision",
+  "created": "$(date +%Y-%m-%d)"
+}
+EOF
+
+  make_link "$FIRST_UUID" "main" > "$LINKS_DIR/main.txt"
+
+  build_config
+
+  echo
+  echo "Setup complete."
+  echo
+  echo "First client link:"
+  cat "$LINKS_DIR/main.txt"
+  echo
+  echo "Run deploy when ready:"
+  echo "vpnctl deploy"
+}
+
+case "$1" in
+  add) add_client "$2" ;;
+  list) list_clients ;;
+  show) show_client "$2" ;;
+  remove) remove_client "$2" ;;
+  disable) disable_client "$2" ;;
+  enable) enable_client "$2" ;;
+  rename) rename_client "$2" "$3" ;;
+  build) build_config ;;
+  verify) verify_config ;;
+  import) import_clients ;;
+  deploy) deploy_config ;;
+  setup) setup_server ;;
+  *)
+    echo "Usage:"
+    echo "  ./vpnctl add <name>"
+    echo "  ./vpnctl list"
+    echo "  ./vpnctl show <name>"
+    echo "  ./vpnctl remove <name>"
+    echo "  ./vpnctl rename <old> <new>"
+    echo "  ./vpnctl build"
+    echo "  ./vpnctl verify"
+    echo "  ./vpnctl import"
+    echo "  ./vpnctl deploy"
+    echo "  ./vpnctl disable <name>"
+    echo "  ./vpnctl enable <name>"
+    echo "  vpnctl setup"
+    ;;
+esac
