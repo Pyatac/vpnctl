@@ -17,16 +17,35 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "$(readlink -f "$0")")" && pwd)"
 
 echo "[1/5] Installing dependencies..."
 apt update
-apt install -y jq openssl
+apt install -y jq openssl curl
 
 if ! command -v sing-box >/dev/null 2>&1; then
   echo
   echo "sing-box not found."
-  echo "Install sing-box first, then run this installer again."
-  echo
-  echo "For now:"
-  echo "https://sing-box.sagernet.org/installation/package-manager/"
-  exit 1
+  read -p "Install sing-box now? [y/N]: " INSTALL_SINGBOX
+
+  if [ "$INSTALL_SINGBOX" = "y" ] || [ "$INSTALL_SINGBOX" = "Y" ]; then
+    echo "Installing sing-box..."
+
+    mkdir -p /etc/apt/keyrings
+    curl -fsSL https://sing-box.app/gpg.key -o /etc/apt/keyrings/sagernet.asc
+    chmod a+r /etc/apt/keyrings/sagernet.asc
+
+    cat > /etc/apt/sources.list.d/sagernet.sources <<EOF
+Types: deb
+URIs: https://deb.sagernet.org/
+Suites: *
+Components: *
+Enabled: yes
+Signed-By: /etc/apt/keyrings/sagernet.asc
+EOF
+
+    apt update
+    apt install -y sing-box
+  else
+    echo "sing-box is required. Aborted."
+    exit 1
+  fi
 fi
 
 echo "[2/5] Creating install directory..."
