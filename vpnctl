@@ -184,15 +184,20 @@ build_config() {
   load_config
   [ ! -f "$TEMPLATE" ] && echo "Template not found: $TEMPLATE" && exit 1
 
-  if ls "$CLIENTS_DIR"/*.json >/dev/null 2>&1; then
-    jq -s 'map({uuid: .uuid, flow: .flow})' "$CLIENTS_DIR"/*.json > /tmp/vpnctl-users.json
-  else
-    echo "[]" > /tmp/vpnctl-users.json
-  fi
+  local tmp_users
+tmp_users=$(mktemp)
 
-  jq --slurpfile users /tmp/vpnctl-users.json \
-    '.inbounds[0].users = $users[0]' \
-    "$TEMPLATE" > "$BUILD"
+trap 'rm -f "$tmp_users"' RETURN
+
+if ls "$CLIENTS_DIR"/*.json >/dev/null 2>&1; then
+  jq -s 'map({uuid: .uuid, flow: .flow})' "$CLIENTS_DIR"/*.json > "$tmp_users"
+else
+  echo "[]" > "$tmp_users"
+fi
+
+jq --slurpfile users "$tmp_users" \
+  '.inbounds[0].users = $users[0]' \
+  "$TEMPLATE" > "$BUILD"
 
   jq empty "$BUILD"
   sing-box check -c "$BUILD"
