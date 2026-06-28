@@ -2,17 +2,20 @@
 set -e
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "$(readlink -f "$0")")" && pwd)"
+DATA_DIR="${VPNCTL_DATA_DIR:-$HOME/.config/vpnctl}"
 
-CONFIG_FILE="$SCRIPT_DIR/config.cfg"
-CLIENTS_DIR="$SCRIPT_DIR/clients"
-LINKS_DIR="$SCRIPT_DIR/links"
-BUILDS_DIR="$SCRIPT_DIR/builds"
-BACKUP_DIR="$SCRIPT_DIR/backups"
-TEMPLATE="$SCRIPT_DIR/template.json"
-BUILD="$SCRIPT_DIR/builds/config.json"
+CONFIG_FILE="$DATA_DIR/config.cfg"
+CLIENTS_DIR="$DATA_DIR/clients"
+LINKS_DIR="$DATA_DIR/links"
+BUILDS_DIR="$DATA_DIR/builds"
+BACKUP_DIR="$DATA_DIR/backups"
+TEMPLATE="$DATA_DIR/template.json"
+BUILD="$DATA_DIR/builds/config.json"
 
 REAL_CONFIG="/etc/sing-box/config.json"
 SERVICE_NAME="sing-box"
+
+mkdir -p "$CLIENTS_DIR" "$LINKS_DIR" "$BUILDS_DIR" "$BACKUP_DIR"
 
 load_config() {
   if [ ! -f "$CONFIG_FILE" ]; then
@@ -23,8 +26,6 @@ load_config() {
 
   source "$CONFIG_FILE"
 }
-
-mkdir -p "$CLIENTS_DIR" "$LINKS_DIR" "$BUILDS_DIR" "$BACKUP_DIR"
 
 make_link() {
   local uuid="$1"
@@ -260,6 +261,12 @@ EOF
 }
 
 deploy_config() {
+  if [ "$EUID" -ne 0 ]; then
+    echo "Deploy requires root privileges."
+    echo "Run:"
+    echo "  sudo VPNCTL_DATA_DIR=$DATA_DIR vpnctl deploy"
+    exit 1
+  fi
   load_config
   verify_config
 
