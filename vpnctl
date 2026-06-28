@@ -14,7 +14,15 @@ BUILD="$SCRIPT_DIR/builds/config.json"
 REAL_CONFIG="/etc/sing-box/config.json"
 SERVICE_NAME="sing-box"
 
-source "$CONFIG_FILE"
+load_config() {
+  if [ ! -f "$CONFIG_FILE" ]; then
+    echo "Config not found: $CONFIG_FILE"
+    echo "Run: vpnctl setup"
+    exit 1
+  fi
+
+  source "$CONFIG_FILE"
+}
 
 mkdir -p "$CLIENTS_DIR" "$LINKS_DIR" "$BUILDS_DIR" "$BACKUP_DIR"
 
@@ -32,6 +40,7 @@ validate_name() {
 }
 
 add_client() {
+  load_config
   local name="$1"
   [ -z "$name" ] && echo "Client name required" && exit 1
   validate_name "$name"
@@ -74,6 +83,7 @@ list_clients() {
 }
 
 show_client() {
+  load_config
   local name="$1"
   [ -z "$name" ] && echo "Client name required" && exit 1
   validate_name "$name"
@@ -138,6 +148,7 @@ enable_client() {
 }
 
 rename_client() {
+  load_config
   local old="$1"
   local new="$2"
 
@@ -169,6 +180,7 @@ rename_client() {
 }
 
 build_config() {
+  load_config
   [ ! -f "$TEMPLATE" ] && echo "Template not found: $TEMPLATE" && exit 1
 
   if ls "$CLIENTS_DIR"/*.json >/dev/null 2>&1; then
@@ -188,6 +200,7 @@ build_config() {
 }
 
 verify_config() {
+  load_config
   build_config
 
   echo
@@ -219,6 +232,7 @@ verify_config() {
 }
 
 import_clients() {
+    load_config
   jq -c '.inbounds[0].users[]' "$REAL_CONFIG" | nl -w1 -s' ' | while read -r num user; do
     uuid=$(echo "$user" | jq -r '.uuid')
     flow=$(echo "$user" | jq -r '.flow // "xtls-rprx-vision"')
@@ -246,6 +260,7 @@ EOF
 }
 
 deploy_config() {
+  load_config
   verify_config
 
   echo
@@ -293,6 +308,17 @@ setup_server() {
 
   SETUP_PORT="${SETUP_PORT:-8443}"
   SETUP_SNI="${SETUP_SNI:-www.cloudflare.com}"
+  
+  if ! echo "$SETUP_PORT" | grep -Eq '^[0-9]+$'; then
+  echo "Invalid port: $SETUP_PORT"
+  exit 1
+  fi
+
+  if [ "$SETUP_PORT" -lt 1 ] || [ "$SETUP_PORT" -gt 65535 ]; then
+  echo "Invalid port: $SETUP_PORT"
+  echo "Port must be between 1 and 65535"
+  exit 1
+  fi
 
   FIRST_UUID=$(sing-box generate uuid)
   KEYPAIR=$(sing-box generate reality-keypair)
@@ -355,6 +381,7 @@ EOF
   ]
 }
 EOF
+  rm -f "$CLIENTS_DIR"/*.json "$CLIENTS_DIR"/*.json.disabled "$LINKS_DIR"/*.txt
 
   cat > "$CLIENTS_DIR/main.json" <<EOF
 {
@@ -364,7 +391,7 @@ EOF
   "created": "$(date +%Y-%m-%d)"
 }
 EOF
-
+  source "$CONFIG_FILE"
   make_link "$FIRST_UUID" "main" > "$LINKS_DIR/main.txt"
 
   build_config
@@ -394,17 +421,17 @@ case "$1" in
   setup) setup_server ;;
   *)
     echo "Usage:"
-    echo "  ./vpnctl add <name>"
-    echo "  ./vpnctl list"
-    echo "  ./vpnctl show <name>"
-    echo "  ./vpnctl remove <name>"
-    echo "  ./vpnctl rename <old> <new>"
-    echo "  ./vpnctl build"
-    echo "  ./vpnctl verify"
-    echo "  ./vpnctl import"
-    echo "  ./vpnctl deploy"
-    echo "  ./vpnctl disable <name>"
-    echo "  ./vpnctl enable <name>"
+    echo "  vpnctl add <name>"
+    echo "  vpnctl list"
+    echo "  vpnctl show <name>"
+    echo "  vpnctl remove <name>"
+    echo "  vpnctl rename <old> <new>"
+    echo "  vpnctl build"
+    echo "  vpnctl verify"
+    echo "  vpnctl import"
+    echo "  vpnctl deploy"
+    echo "  vpnctl disable <name>"
+    echo "  vpnctl enable <name>"
     echo "  vpnctl setup"
     ;;
 esac
