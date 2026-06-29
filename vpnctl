@@ -267,11 +267,9 @@ EOF
 
 deploy_config() {
   if [ "$EUID" -ne 0 ]; then
-    echo "Deploy requires root privileges."
-    echo "Run:"
-    echo "  sudo VPNCTL_DATA_DIR=$DATA_DIR vpnctl deploy"
-    exit 1
+    exec sudo VPNCTL_DATA_DIR="$DATA_DIR" "$0" deploy
   fi
+
   load_config
   verify_config
 
