@@ -265,6 +265,27 @@ EOF
   build_config
 }
 
+ensure_ufw_port() {
+  load_config
+
+  if ! command -v ufw >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if ! ufw status | grep -q "^Status: active"; then
+    echo "UFW: inactive."
+    return 0
+  fi
+
+  if ufw status | grep -qE "(^|[[:space:]])${PORT}/tcp([[:space:]]|$)"; then
+    echo "UFW: TCP port ${PORT} already allowed."
+    return 0
+  fi
+
+  echo "UFW: opening TCP port ${PORT}..."
+  ufw allow "${PORT}/tcp"
+}
+
 deploy_config() {
   if [ "$EUID" -ne 0 ]; then
     exec sudo VPNCTL_DATA_DIR="$DATA_DIR" "$0" deploy
@@ -272,6 +293,7 @@ deploy_config() {
 
   load_config
   verify_config
+  ensure_ufw_port
 
   echo
   echo "About to replace:"
